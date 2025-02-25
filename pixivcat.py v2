@@ -1,0 +1,107 @@
+import os
+import time
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import requests
+
+# Read image IDs from file
+with open("pixiv_ids.txt", "r") as file:
+    image_ids = [line.strip() for line in file if line.strip().isdigit()]
+
+# Set up save folder
+save_folder = "pixiv_images"
+os.makedirs(save_folder, exist_ok=True)
+
+# Initialize Selenium WebDriver
+options = webdriver.ChromeOptions()
+options.add_argument('--headless')  # Run in headless mode
+options.add_argument('--no-sandbox')
+options.add_argument('--disable-dev-shm-usage')
+options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+def download_image(url, save_path, max_retries=3):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Referer": "https://pixiv.cat/"
+    }
+
+    for attempt in range(max_retries):
+        try:
+            # Use Selenium to load the page
+            driver.get(url)
+            # Wait for an image element or body to ensure the page loads
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+
+            # Get the final URL after any redirects or Cloudflare checks
+            final_url = driver.current_url
+            if "pixiv.cat" not in final_url:
+                print(f"⚠️ Redirected away from pixiv.cat at {url}")
+                return False
+
+            # Use requests to download the image content
+            response = requests.get(url, headers=headers, stream=True, timeout=15)
+            response.raise_for_status()
+
+            if "image" in response.headers.get("Content-Type", ""):
+                content_length = int(response.headers.get("Content-Length", 0))
+                downloaded_bytes = 0
+
+                with open(save_path, 'wb') as file:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            file.write(chunk)
+                            downloaded_bytes += len(chunk)
+
+                if content_length > 0 and downloaded_bytes < content_length:
+                    print(f"Incomplete download: {url}")
+                    os.remove(save_path)
+                    return False
+
+                print(f"✅ Downloaded: {save_path}")
+                return True
+            else:
+                print(f"⚠️ Not an image or no content at {url}")
+                return False
+
+        except Exception as e:
+            if "502" in str(e) or "cloudflare" in str(e).lower():
+                print(f"🔄 Retry {attempt + 1}/{max_retries} for Cloudflare/502 issue: {url}")
+                time.sleep(5)
+            else:
+                print(f"❌ Error accessing {url}: {e}")
+                return False
+
+    print(f"❌ Skipping {url} after {max_retries} retries")
+    return False
+
+# Main loop
+try:
+    for x in image_ids:
+        time.sleep(2)  # Slower rate to mimic human behavior
+
+        jpg_url = f"https://pixiv.cat/{x}.jpg"
+        png_url = f"https://pixiv.cat/{x}.png"
+        png_alt_url = f"https://pixiv.cat/{x}-1.png"
+
+        jpg_path = os.path.join(save_folder, f"{x}.jpg")
+        png_path = os.path.join(save_folder, f"{x}.png")
+
+        if download_image(jpg_url, jpg_path):
+            continue
+        if download_image(png_url, png_path):
+            continue
+        if download_image(png_alt_url, png_path):
+            continue
+
+        print(f"🚫 No valid image for {x}")
+
+finally:
+    driver.quit()  # Ensure the browser closes
+    print("Browser closed.")
